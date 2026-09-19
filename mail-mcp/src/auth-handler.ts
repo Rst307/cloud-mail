@@ -4,8 +4,8 @@ import { Hono } from "hono";
 interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
   OAUTH_KV: KVNamespace;
-  GITHUB_CLIENT_ID: string;
-  GITHUB_CLIENT_SECRET: string;
+  GH_OAUTH_CLIENT_ID: string;
+  GH_OAUTH_CLIENT_SECRET: string;
   ALLOWED_GITHUB_LOGIN: string;
 }
 
@@ -122,7 +122,7 @@ app.post("/authorize", async (c) => {
 
   const callback = new URL("/callback", c.req.url).href;
   const github = new URL("https://github.com/login/oauth/authorize");
-  github.searchParams.set("client_id", c.env.GITHUB_CLIENT_ID);
+  github.searchParams.set("client_id", c.env.GH_OAUTH_CLIENT_ID);
   github.searchParams.set("redirect_uri", callback);
   github.searchParams.set("scope", "read:user user:email");
   github.searchParams.set("state", state);
@@ -162,8 +162,8 @@ app.get("/callback", async (c) => {
       "Content-Type": "application/x-www-form-urlencoded"
     },
     body: new URLSearchParams({
-      client_id: c.env.GITHUB_CLIENT_ID,
-      client_secret: c.env.GITHUB_CLIENT_SECRET,
+      client_id: c.env.GH_OAUTH_CLIENT_ID,
+      client_secret: c.env.GH_OAUTH_CLIENT_SECRET,
       code,
       redirect_uri: callback
     })
