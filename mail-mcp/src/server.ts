@@ -16,10 +16,26 @@ function getEnv() {
   return env as unknown as MailMcpEnv;
 }
 
+function getScopes(context: any) {
+  return (context?.http?.authInfo?.scopes || []) as string[];
+}
+
 function requireScope(context: any, scope: "mail.read" | "mail.send") {
-  const scopes: string[] = context?.http?.authInfo?.scopes || [];
+  const scopes = getScopes(context);
   if (!scopes.includes(scope)) {
     throw new Error(`OAuth scope ${scope} is required for this tool`);
+  }
+}
+
+function requireAnyScope(
+  context: any,
+  scopesRequired: Array<"mail.read" | "mail.send">
+) {
+  const scopes = getScopes(context);
+  if (!scopesRequired.some((scope) => scopes.includes(scope))) {
+    throw new Error(
+      `One of these OAuth scopes is required for this tool: ${scopesRequired.join(", ")}`
+    );
   }
 }
 
@@ -82,7 +98,7 @@ function createServer() {
       }
     },
     async (_args, context) => {
-      requireScope(context, "mail.read");
+      requireAnyScope(context, ["mail.read", "mail.send"]);
       const auth = getMcpAuthContext();
       const profile = await callMail("/profile");
       return result({
@@ -105,7 +121,10 @@ function createServer() {
       }
     },
     async (_args, context) => {
-      requireScope(context, "mail.read");
+      // A sender must be able to discover its own valid from-address/accountId.
+      // This does not expose message contents, so either read or send permission
+      // is sufficient.
+      requireAnyScope(context, ["mail.read", "mail.send"]);
       return result(await callMail("/accounts"));
     }
   );
@@ -269,6 +288,7 @@ const apiHandler = {
 
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
+  scopesSupported: ["mail.read", "mail.send"],
   tokenEndpoint: "/oauth/token",
   clientRegistrationEndpoint: "/oauth/register",
   apiRoute: "/mcp",
