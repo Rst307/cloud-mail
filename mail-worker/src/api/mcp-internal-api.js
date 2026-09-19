@@ -180,6 +180,10 @@ app.post('/internal/mcp/reply', async (c) => {
 		throw new BizError('Email not found', 404);
 	}
 
+	if (source.type !== emailConst.type.RECEIVE) {
+		throw new BizError('Only received emails can be replied to', 400);
+	}
+
 	const recipient = source.sendEmail;
 	if (!recipient) throw new BizError('Original sender is unavailable', 400);
 
