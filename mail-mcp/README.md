@@ -53,8 +53,8 @@ Before running **Deploy Cloud Mail MCP**, add these Actions secrets:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
-- `GITHUB_CLIENT_ID`
-- `GITHUB_CLIENT_SECRET`
+- `GH_OAUTH_CLIENT_ID`
+- `GH_OAUTH_CLIENT_SECRET`
 - `COOKIE_ENCRYPTION_KEY` — random high-entropy string, e.g. 32+ random bytes
 - `MCP_INTERNAL_SECRET` — a different random high-entropy string
 
