@@ -29,10 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4.1.0
-        with:
-          version: 11
-
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -50,7 +46,7 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: ./mail-mcp
-        run: pnpm install --no-frozen-lockfile
+        run: npm install
 
       - name: Resolve OAuth KV namespace
         working-directory: ./mail-mcp
@@ -61,13 +57,13 @@ jobs:
             KV_NAME="${MCP_WORKER_NAME}-oauth"
             echo "🔍 Looking for KV namespace: $KV_NAME"
 
-            KV_LIST=$(pnpm wrangler kv namespace list)
+            KV_LIST=$(npx wrangler kv namespace list)
             OAUTH_KV_ID=$(echo "$KV_LIST" | jq -r --arg name "$KV_NAME" '.[] | select(.title == $name) | .id' | head -n 1)
 
             if [ -z "$OAUTH_KV_ID" ] || [ "$OAUTH_KV_ID" = "null" ]; then
               echo "⚠️ OAuth KV namespace does not exist. Creating it..."
-              pnpm wrangler kv namespace create "$KV_NAME"
-              KV_LIST=$(pnpm wrangler kv namespace list)
+              npx wrangler kv namespace create "$KV_NAME"
+              KV_LIST=$(npx wrangler kv namespace list)
               OAUTH_KV_ID=$(echo "$KV_LIST" | jq -r --arg name "$KV_NAME" '.[] | select(.title == $name) | .id' | head -n 1)
             fi
 
@@ -97,11 +93,11 @@ jobs:
 
       - name: Type-check
         working-directory: ./mail-mcp
-        run: pnpm type-check
+        run: npm run type-check
 
       - name: Deploy MCP worker
         working-directory: ./mail-mcp
-        run: pnpm wrangler deploy -c wrangler-action.toml
+        run: npx wrangler deploy -c wrangler-action.toml
 
       - name: Configure MCP worker secrets
         working-directory: ./mail-mcp
@@ -111,7 +107,7 @@ jobs:
             name="$1"
             value="$2"
             target="$3"
-            printf '%s' "$value" | pnpm wrangler secret put "$name" --name "$target" >/dev/null
+            printf '%s' "$value" | npx wrangler secret put "$name" --name "$target" >/dev/null
           }
 
           put_secret GITHUB_CLIENT_ID "$GITHUB_CLIENT_ID" "$MCP_WORKER_NAME"
