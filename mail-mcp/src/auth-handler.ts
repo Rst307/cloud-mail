@@ -20,13 +20,28 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#039;");
 }
 
-function readCookie(request: Request, name: string) {
-  const cookies = request.headers.get("Cookie") || "";
-  for (const part of cookies.split(";")) {
-    const [key, ...rest] = part.trim().split("=");
-    if (key === name) return rest.join("=");
+function isSameOriginConsentPost(request: Request) {
+  const expectedOrigin = new URL(request.url).origin;
+
+  const fetchSite = request.headers.get("Sec-Fetch-Site");
+  if (fetchSite && fetchSite !== "same-origin") return false;
+
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== expectedOrigin) return false;
+
+  const referer = request.headers.get("Referer");
+  if (referer) {
+    try {
+      if (new URL(referer).origin !== expectedOrigin) return false;
+    } catch {
+      return false;
+    }
   }
-  return null;
+
+  // Require at least one browser-controlled same-origin signal.
+  return fetchSite === "same-origin"
+    || origin === expectedOrigin
+    || Boolean(referer);
 }
 
 function requestedScopes(request: AuthRequest) {
@@ -43,9 +58,12 @@ app.get("/authorize", async (c) => {
   const client = await c.env.OAUTH_PROVIDER.lookupClient(oauthReqInfo.clientId);
   if (!client) return c.text("Unknown OAuth client", 400);
 
-  const csrf = crypto.randomUUID();
-  const csrfId = crypto.randomUUID().replace(/-/g, "");
-  const csrfCookieName = `__Host-MCP_CSRF_${csrfId}`;
+  const consentToken = crypto.randomUUID();
+  await c.env.OAUTH_KV.put(
+    `mcp:consent:${consentToken}`,
+    JSON.stringify(oauthReqInfo),
+    { expirationTtl: 600 }
+  );
   const encoded = btoa(JSON.stringify(oauthReqInfo));
   const clientName = escapeHtml(client.clientName || "ChatGPT / MCP client");
   const scopes = requestedScopes(oauthReqInfo).map(escapeHtml).join(", ");
@@ -72,8 +90,7 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
   <div class="scope"><strong>Scopes:</strong> ${scopes}</div>
   <form method="post" action="/authorize">
     <input type="hidden" name="oauth_request" value="${escapeHtml(encoded)}">
-    <input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">
-    <input type="hidden" name="csrf_cookie" value="${escapeHtml(csrfCookieName)}">
+    <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
     <div class="actions">
       <button class="btn secondary" type="button" onclick="history.back()">Cancel</button>
       <button class="btn primary" type="submit">Continue with GitHub</button>
@@ -88,7 +105,7 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
       "Content-Type": "text/html; charset=utf-8",
       "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
       "X-Frame-Options": "DENY",
-      "Set-Cookie": `${csrfCookieName}=${csrf}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`
+      "X-Content-Type-Options": "nosniff"
     }
   });
 });
@@ -96,29 +113,33 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
 app.post("/authorize", async (c) => {
   const form = await c.req.formData();
   const encoded = form.get("oauth_request");
-  const csrf = form.get("csrf_token");
-  const csrfCookieName = form.get("csrf_cookie");
+  const consentToken = form.get("consent_token");
 
-  if (
-    typeof encoded !== "string" ||
-    typeof csrf !== "string" ||
-    typeof csrfCookieName !== "string"
-  ) {
+  if (typeof encoded !== "string" || typeof consentToken !== "string") {
     return c.text("Invalid authorization form", 400);
   }
 
-  if (!/^__Host-MCP_CSRF_[a-f0-9]{32}$/.test(csrfCookieName)) {
-    return c.text("Invalid CSRF cookie identifier", 400);
-  }
-
-  const csrfCookie = readCookie(c.req.raw, csrfCookieName);
-  if (!csrfCookie || csrfCookie !== csrf) {
+  if (!isSameOriginConsentPost(c.req.raw)) {
     return c.text("CSRF validation failed", 400);
   }
 
+  const storedConsent = await c.env.OAUTH_KV.get(`mcp:consent:${consentToken}`);
+  if (!storedConsent) {
+    return c.text("Authorization request expired. Please restart the connection.", 400);
+  }
+  await c.env.OAUTH_KV.delete(`mcp:consent:${consentToken}`);
+
   let oauthReqInfo: AuthRequest;
   try {
-    oauthReqInfo = JSON.parse(atob(encoded)) as AuthRequest;
+    const submitted = JSON.parse(atob(encoded)) as AuthRequest;
+    const stored = JSON.parse(storedConsent) as AuthRequest;
+
+    // The hidden form value is treated as untrusted. It must match the
+    // server-side one-time authorization request stored in KV.
+    if (JSON.stringify(submitted) !== JSON.stringify(stored)) {
+      return c.text("Authorization request mismatch", 400);
+    }
+    oauthReqInfo = stored;
   } catch {
     return c.text("Invalid OAuth request state", 400);
   }
@@ -128,7 +149,6 @@ app.post("/authorize", async (c) => {
   }
 
   const state = crypto.randomUUID();
-  const stateCookieName = `__Host-MCP_OAUTH_STATE_${state.replace(/-/g, "")}`;
   await c.env.OAUTH_KV.put(`mcp:oauth:state:${state}`, JSON.stringify(oauthReqInfo), {
     expirationTtl: 600
   });
@@ -140,24 +160,17 @@ app.post("/authorize", async (c) => {
   github.searchParams.set("scope", "read:user user:email");
   github.searchParams.set("state", state);
 
-  const headers = new Headers({ Location: github.href });
-  headers.append("Set-Cookie", `${stateCookieName}=${state}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`);
-  headers.append("Set-Cookie", `${csrfCookieName}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`);
-
-  return new Response(null, { status: 302, headers });
+  return new Response(null, {
+    status: 302,
+    headers: { Location: github.href }
+  });
 });
 
 app.get("/callback", async (c) => {
   const state = c.req.query("state");
   const code = c.req.query("code");
-  const stateCookieName = state
-    ? `__Host-MCP_OAUTH_STATE_${state.replace(/-/g, "")}`
-    : null;
-  const stateCookie = stateCookieName
-    ? readCookie(c.req.raw, stateCookieName)
-    : null;
 
-  if (!state || !code || !stateCookie || state !== stateCookie) {
+  if (!state || !code) {
     return c.text("Invalid OAuth callback state", 400);
   }
 
@@ -240,11 +253,10 @@ app.get("/callback", async (c) => {
     }
   });
 
-  const headers = new Headers({ Location: redirectTo });
-  if (stateCookieName) {
-    headers.append("Set-Cookie", `${stateCookieName}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`);
-  }
-  return new Response(null, { status: 302, headers });
+  return new Response(null, {
+    status: 302,
+    headers: { Location: redirectTo }
+  });
 });
 
 app.get("/", (c) => c.json({
