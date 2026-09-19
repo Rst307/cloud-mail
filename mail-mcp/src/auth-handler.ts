@@ -187,7 +187,12 @@ app.get("/callback", async (c) => {
       email,
       mcpClientId: oauthReqInfo.clientId,
       mcpScopes: grantedScopes
-    }
+    },
+    // ChatGPT can briefly keep using the previous grant while a reconnect
+    // finishes propagating. Revoking that grant here turns those in-flight
+    // credentials into 401 invalid_token responses. Keep grants side-by-side;
+    // OAuthProvider still enforces their normal access/refresh token TTLs.
+    revokeExistingGrants: false
   });
 
   return new Response(null, {
