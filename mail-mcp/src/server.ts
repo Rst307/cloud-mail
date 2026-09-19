@@ -289,6 +289,13 @@ const apiHandler = {
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
   scopesSupported: ["mail.read", "mail.send"],
+  resourceMetadata: {
+    resource: "https://mcp.rst307.cn/mcp",
+    authorization_servers: ["https://mcp.rst307.cn"],
+    scopes_supported: ["mail.read", "mail.send"],
+    bearer_methods_supported: ["header"],
+    resource_name: "Cloud Mail MCP"
+  },
   tokenEndpoint: "/oauth/token",
   clientRegistrationEndpoint: "/oauth/register",
   apiRoute: "/mcp",
