@@ -1,0 +1,19 @@
+name = "${MCP_WORKER_NAME}"
+main = "src/server.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "${OAUTH_KV_ID}"
+
+[[services]]
+binding = "MAIL_SERVICE"
+service = "${MAIL_WORKER_NAME}"
+
+[[routes]]
+pattern = "${MCP_CUSTOM_DOMAIN}"
+custom_domain = true

@@ -1,0 +1,122 @@
+name: 🚀 Deploy Cloud Mail MCP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "mail-mcp/**"
+      - ".github/workflows/deploy-mail-mcp.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || vars.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      MCP_WORKER_NAME: ${{ secrets.MCP_WORKER_NAME || vars.MCP_WORKER_NAME || 'cloud-mail-mcp' }}
+      MAIL_WORKER_NAME: ${{ secrets.MAIL_WORKER_NAME || vars.MAIL_WORKER_NAME || 'cloud-mail' }}
+      MCP_CUSTOM_DOMAIN: ${{ secrets.MCP_CUSTOM_DOMAIN || vars.MCP_CUSTOM_DOMAIN }}
+      OAUTH_KV_ID: ${{ secrets.OAUTH_KV_ID || vars.OAUTH_KV_ID }}
+
+      GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+      GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+      COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
+      MCP_INTERNAL_SECRET: ${{ secrets.MCP_INTERNAL_SECRET }}
+      ALLOWED_GITHUB_LOGIN: ${{ secrets.ALLOWED_GITHUB_LOGIN || vars.ALLOWED_GITHUB_LOGIN || 'Rst307' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Validate deployment variables
+        run: |
+          set -eu
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID GH_OAUTH_CLIENT_ID GH_OAUTH_CLIENT_SECRET COOKIE_ENCRYPTION_KEY MCP_INTERNAL_SECRET ALLOWED_GITHUB_LOGIN; do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then
+              echo "❌ Missing required value: $name"
+              exit 1
+            fi
+          done
+
+      - name: Install MCP dependencies
+        working-directory: ./mail-mcp
+        run: npm install
+
+      - name: Resolve OAuth KV namespace
+        working-directory: ./mail-mcp
+        run: |
+          set -eu
+
+          if [ -z "$OAUTH_KV_ID" ]; then
+            KV_NAME="${MCP_WORKER_NAME}-oauth"
+            echo "🔍 Looking for KV namespace: $KV_NAME"
+
+            KV_LIST=$(npx wrangler kv namespace list)
+            OAUTH_KV_ID=$(echo "$KV_LIST" | jq -r --arg name "$KV_NAME" '.[] | select(.title == $name) | .id' | head -n 1)
+
+            if [ -z "$OAUTH_KV_ID" ] || [ "$OAUTH_KV_ID" = "null" ]; then
+              echo "⚠️ OAuth KV namespace does not exist. Creating it..."
+              npx wrangler kv namespace create "$KV_NAME"
+              KV_LIST=$(npx wrangler kv namespace list)
+              OAUTH_KV_ID=$(echo "$KV_LIST" | jq -r --arg name "$KV_NAME" '.[] | select(.title == $name) | .id' | head -n 1)
+            fi
+
+            if [ -z "$OAUTH_KV_ID" ] || [ "$OAUTH_KV_ID" = "null" ]; then
+              echo "❌ Could not resolve OAuth KV namespace ID."
+              exit 1
+            fi
+          fi
+
+          echo "OAUTH_KV_ID=$OAUTH_KV_ID" >> "$GITHUB_ENV"
+
+      - name: Build Wrangler configuration
+        working-directory: ./mail-mcp
+        run: |
+          set -eu
+          CONFIG_FILE="wrangler-action.toml"
+
+          sed -i "s|\${MCP_WORKER_NAME}|$MCP_WORKER_NAME|g" "$CONFIG_FILE"
+          sed -i "s|\${MAIL_WORKER_NAME}|$MAIL_WORKER_NAME|g" "$CONFIG_FILE"
+          sed -i "s|\${OAUTH_KV_ID}|$OAUTH_KV_ID|g" "$CONFIG_FILE"
+
+          if [ -n "$MCP_CUSTOM_DOMAIN" ]; then
+            sed -i "s|\${MCP_CUSTOM_DOMAIN}|$MCP_CUSTOM_DOMAIN|g" "$CONFIG_FILE"
+          else
+            sed -i '/\[\[routes\]\]/,/^$/d' "$CONFIG_FILE"
+          fi
+
+      - name: Type-check
+        working-directory: ./mail-mcp
+        run: npm run type-check
+
+      - name: Deploy MCP worker
+        working-directory: ./mail-mcp
+        run: npx wrangler deploy -c wrangler-action.toml
+
+      - name: Configure MCP worker secrets
+        working-directory: ./mail-mcp
+        run: |
+          set -eu
+          put_secret() {
+            name="$1"
+            value="$2"
+            target="$3"
+            printf '%s' "$value" | npx wrangler secret put "$name" --name "$target" >/dev/null
+          }
+
+          put_secret GH_OAUTH_CLIENT_ID "$GH_OAUTH_CLIENT_ID" "$MCP_WORKER_NAME"
+          put_secret GH_OAUTH_CLIENT_SECRET "$GH_OAUTH_CLIENT_SECRET" "$MCP_WORKER_NAME"
+          put_secret COOKIE_ENCRYPTION_KEY "$COOKIE_ENCRYPTION_KEY" "$MCP_WORKER_NAME"
+          put_secret MCP_INTERNAL_SECRET "$MCP_INTERNAL_SECRET" "$MCP_WORKER_NAME"
+          put_secret ALLOWED_GITHUB_LOGIN "$ALLOWED_GITHUB_LOGIN" "$MCP_WORKER_NAME"
+
+          # The same secret protects the private adapter on the existing mail worker.
+          put_secret MCP_INTERNAL_SECRET "$MCP_INTERNAL_SECRET" "$MAIL_WORKER_NAME"
+
+          echo "✅ MCP secrets configured."

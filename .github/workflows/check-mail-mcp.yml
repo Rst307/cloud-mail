@@ -1,0 +1,44 @@
+name: ✅ Check Cloud Mail MCP
+
+on:
+  push:
+    branches:
+      - "feat/**"
+    paths:
+      - "mail-mcp/**"
+      - "mail-worker/src/api/mcp-internal-api.js"
+      - "mail-worker/src/hono/webs.js"
+      - "mail-worker/src/security/security.js"
+      - ".github/workflows/check-mail-mcp.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "mail-mcp/**"
+      - "mail-worker/src/api/mcp-internal-api.js"
+      - "mail-worker/src/hono/webs.js"
+      - "mail-worker/src/security/security.js"
+      - ".github/workflows/check-mail-mcp.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Check internal adapter syntax
+        run: |
+          node --check mail-worker/src/api/mcp-internal-api.js
+          node --check mail-worker/src/hono/webs.js
+          node --check mail-worker/src/security/security.js
+
+      - name: Install MCP dependencies
+        working-directory: ./mail-mcp
+        run: npm install
+
+      - name: Type-check MCP worker
+        working-directory: ./mail-mcp
+        run: npm run type-check
