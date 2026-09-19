@@ -172,17 +172,21 @@ app.get("/callback", async (c) => {
     }
   }
 
+  const grantedScopes = requestedScopes(oauthReqInfo);
+
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     request: oauthReqInfo,
     userId: user.login,
     metadata: {
       label: user.name || user.login
     },
-    scope: requestedScopes(oauthReqInfo),
+    scope: grantedScopes,
     props: {
       login: user.login,
       name: user.name || user.login,
-      email
+      email,
+      mcpClientId: oauthReqInfo.clientId,
+      mcpScopes: grantedScopes
     }
   });
 
