@@ -10,6 +10,7 @@ interface MailMcpEnv {
     fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
   };
   MCP_INTERNAL_SECRET: string;
+  ALLOWED_GITHUB_LOGIN: string;
 }
 
 function getEnv() {
@@ -279,22 +280,37 @@ function createServer() {
 const mcpHandler = createMcpHandler(createServer);
 
 const apiHandler = {
-  fetch(request: Request, _bindings: unknown, ctx: ExecutionContext) {
+  fetch(request: Request, bindings: unknown, ctx: ExecutionContext) {
     const props = (ctx.props || {}) as Record<string, unknown>;
+    const runtime = bindings as MailMcpEnv;
     const authorization = request.headers.get("Authorization") || "";
     const match = /^Bearer\\s+(.+)$/i.exec(authorization);
     const token = match?.[1];
-    const clientId =
-      typeof props.mcpClientId === "string" ? props.mcpClientId : undefined;
-    const scopes = Array.isArray(props.mcpScopes)
-      ? props.mcpScopes.filter((scope): scope is string => typeof scope === "string")
-      : [];
 
-    if (!token || !clientId) {
+    const allowedLogins = (runtime.ALLOWED_GITHUB_LOGIN || "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const login =
+      typeof props.login === "string" ? props.login.toLowerCase() : "";
+
+    if (!token || !login || !allowedLogins.includes(login)) {
       return new Response("Authenticated MCP context is incomplete", {
-        status: 500
+        status: 401
       });
     }
+
+    // New grants persist the real client ID and scopes in encrypted OAuth props.
+    // Older grants predate that bridge; since OAuthProvider has already validated
+    // the bearer token and this deployment is restricted to ALLOWED_GITHUB_LOGIN,
+    // use the server's historical default scopes as a migration fallback.
+    const clientId =
+      typeof props.mcpClientId === "string" && props.mcpClientId
+        ? props.mcpClientId
+        : "cloud-mail-mcp-legacy-client";
+    const scopes = Array.isArray(props.mcpScopes)
+      ? props.mcpScopes.filter((scope): scope is string => typeof scope === "string")
+      : ["mail.read", "mail.send"];
 
     return mcpHandler.fetch(request, {
       authInfo: {
