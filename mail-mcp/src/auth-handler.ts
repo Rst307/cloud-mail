@@ -44,6 +44,8 @@ app.get("/authorize", async (c) => {
   if (!client) return c.text("Unknown OAuth client", 400);
 
   const csrf = crypto.randomUUID();
+  const csrfId = crypto.randomUUID().replace(/-/g, "");
+  const csrfCookieName = `__Host-MCP_CSRF_${csrfId}`;
   const encoded = btoa(JSON.stringify(oauthReqInfo));
   const clientName = escapeHtml(client.clientName || "ChatGPT / MCP client");
   const scopes = requestedScopes(oauthReqInfo).map(escapeHtml).join(", ");
@@ -71,6 +73,7 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
   <form method="post" action="/authorize">
     <input type="hidden" name="oauth_request" value="${escapeHtml(encoded)}">
     <input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">
+    <input type="hidden" name="csrf_cookie" value="${escapeHtml(csrfCookieName)}">
     <div class="actions">
       <button class="btn secondary" type="button" onclick="history.back()">Cancel</button>
       <button class="btn primary" type="submit">Continue with GitHub</button>
@@ -85,7 +88,7 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
       "Content-Type": "text/html; charset=utf-8",
       "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
       "X-Frame-Options": "DENY",
-      "Set-Cookie": `__Host-MCP_CSRF=${csrf}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`
+      "Set-Cookie": `${csrfCookieName}=${csrf}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`
     }
   });
 });
@@ -94,12 +97,21 @@ app.post("/authorize", async (c) => {
   const form = await c.req.formData();
   const encoded = form.get("oauth_request");
   const csrf = form.get("csrf_token");
+  const csrfCookieName = form.get("csrf_cookie");
 
-  if (typeof encoded !== "string" || typeof csrf !== "string") {
+  if (
+    typeof encoded !== "string" ||
+    typeof csrf !== "string" ||
+    typeof csrfCookieName !== "string"
+  ) {
     return c.text("Invalid authorization form", 400);
   }
 
-  const csrfCookie = readCookie(c.req.raw, "__Host-MCP_CSRF");
+  if (!/^__Host-MCP_CSRF_[a-f0-9]{32}$/.test(csrfCookieName)) {
+    return c.text("Invalid CSRF cookie identifier", 400);
+  }
+
+  const csrfCookie = readCookie(c.req.raw, csrfCookieName);
   if (!csrfCookie || csrfCookie !== csrf) {
     return c.text("CSRF validation failed", 400);
   }
@@ -116,6 +128,7 @@ app.post("/authorize", async (c) => {
   }
 
   const state = crypto.randomUUID();
+  const stateCookieName = `__Host-MCP_OAUTH_STATE_${state.replace(/-/g, "")}`;
   await c.env.OAUTH_KV.put(`mcp:oauth:state:${state}`, JSON.stringify(oauthReqInfo), {
     expirationTtl: 600
   });
@@ -128,8 +141,8 @@ app.post("/authorize", async (c) => {
   github.searchParams.set("state", state);
 
   const headers = new Headers({ Location: github.href });
-  headers.append("Set-Cookie", `__Host-MCP_OAUTH_STATE=${state}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`);
-  headers.append("Set-Cookie", "__Host-MCP_CSRF=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0");
+  headers.append("Set-Cookie", `${stateCookieName}=${state}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`);
+  headers.append("Set-Cookie", `${csrfCookieName}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`);
 
   return new Response(null, { status: 302, headers });
 });
@@ -137,7 +150,12 @@ app.post("/authorize", async (c) => {
 app.get("/callback", async (c) => {
   const state = c.req.query("state");
   const code = c.req.query("code");
-  const stateCookie = readCookie(c.req.raw, "__Host-MCP_OAUTH_STATE");
+  const stateCookieName = state
+    ? `__Host-MCP_OAUTH_STATE_${state.replace(/-/g, "")}`
+    : null;
+  const stateCookie = stateCookieName
+    ? readCookie(c.req.raw, stateCookieName)
+    : null;
 
   if (!state || !code || !stateCookie || state !== stateCookie) {
     return c.text("Invalid OAuth callback state", 400);
@@ -223,7 +241,9 @@ app.get("/callback", async (c) => {
   });
 
   const headers = new Headers({ Location: redirectTo });
-  headers.append("Set-Cookie", "__Host-MCP_OAUTH_STATE=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0");
+  if (stateCookieName) {
+    headers.append("Set-Cookie", `${stateCookieName}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`);
+  }
   return new Response(null, { status: 302, headers });
 });
 
