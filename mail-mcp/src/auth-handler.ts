@@ -20,30 +20,6 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#039;");
 }
 
-function isSameOriginConsentPost(request: Request) {
-  const expectedOrigin = new URL(request.url).origin;
-
-  const fetchSite = request.headers.get("Sec-Fetch-Site");
-  if (fetchSite && fetchSite !== "same-origin") return false;
-
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== expectedOrigin) return false;
-
-  const referer = request.headers.get("Referer");
-  if (referer) {
-    try {
-      if (new URL(referer).origin !== expectedOrigin) return false;
-    } catch {
-      return false;
-    }
-  }
-
-  // Require at least one browser-controlled same-origin signal.
-  return fetchSite === "same-origin"
-    || origin === expectedOrigin
-    || Boolean(referer);
-}
-
 function requestedScopes(request: AuthRequest) {
   const requested = Array.isArray(request.scope) ? request.scope : [];
   const supported = new Set(["mail.read", "mail.send"]);
@@ -58,15 +34,26 @@ app.get("/authorize", async (c) => {
   const client = await c.env.OAUTH_PROVIDER.lookupClient(oauthReqInfo.clientId);
   if (!client) return c.text("Unknown OAuth client", 400);
 
-  const consentToken = crypto.randomUUID();
+  // Store the full OAuth request server-side before rendering the consent page.
+  // The GitHub button can therefore be a normal external link with no form POST
+  // or cookie dependency, which is more reliable in embedded OAuth windows.
+  const state = crypto.randomUUID();
   await c.env.OAUTH_KV.put(
-    `mcp:consent:${consentToken}`,
-    JSON.stringify(oauthReqInfo),
+    `mcp:oauth:state:${state}`,
+    JSON.stringify({ oauthReqInfo }),
     { expirationTtl: 600 }
   );
-  const encoded = btoa(JSON.stringify(oauthReqInfo));
+
+  const callback = new URL("/callback", c.req.url).href;
+  const github = new URL("https://github.com/login/oauth/authorize");
+  github.searchParams.set("client_id", c.env.GH_OAUTH_CLIENT_ID);
+  github.searchParams.set("redirect_uri", callback);
+  github.searchParams.set("scope", "read:user user:email");
+  github.searchParams.set("state", state);
+
   const clientName = escapeHtml(client.clientName || "ChatGPT / MCP client");
   const scopes = requestedScopes(oauthReqInfo).map(escapeHtml).join(", ");
+  const githubUrl = escapeHtml(github.href);
 
   const html = `<!doctype html>
 <html lang="en">
@@ -78,7 +65,7 @@ app.get("/authorize", async (c) => {
 body{font-family:system-ui,-apple-system,sans-serif;background:#f6f7f9;color:#111;margin:0;padding:32px}
 .card{max-width:560px;margin:40px auto;background:#fff;border:1px solid #ddd;border-radius:14px;padding:28px}
 h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:#f3f4f6;border-radius:8px}
-.actions{display:flex;gap:12px;margin-top:24px}.btn{border:0;border-radius:8px;padding:11px 16px;font-size:15px;cursor:pointer}
+.actions{display:flex;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;border:0;border-radius:8px;padding:11px 16px;font-size:15px;cursor:pointer}
 .primary{background:#111;color:#fff}.secondary{background:#e8e8e8;color:#111}
 </style>
 </head>
@@ -88,14 +75,10 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
   <p><strong>${clientName}</strong> is requesting access to your Cloud Mail MCP server.</p>
   <p class="muted">You will sign in with GitHub next. Only the GitHub account configured in ALLOWED_GITHUB_LOGIN will be accepted.</p>
   <div class="scope"><strong>Scopes:</strong> ${scopes}</div>
-  <form method="post" action="/authorize">
-    <input type="hidden" name="oauth_request" value="${escapeHtml(encoded)}">
-    <input type="hidden" name="consent_token" value="${escapeHtml(consentToken)}">
-    <div class="actions">
-      <button class="btn secondary" type="button" onclick="history.back()">Cancel</button>
-      <button class="btn primary" type="submit">Continue with GitHub</button>
-    </div>
-  </form>
+  <div class="actions">
+    <a class="btn secondary" href="/">Cancel</a>
+    <a class="btn primary" href="${githubUrl}">Continue with GitHub</a>
+  </div>
 </div>
 </body>
 </html>`;
@@ -103,66 +86,11 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
   return new Response(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self' https://github.com; frame-ancestors 'none'",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
       "X-Frame-Options": "DENY",
-      "X-Content-Type-Options": "nosniff"
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-store"
     }
-  });
-});
-
-app.post("/authorize", async (c) => {
-  const form = await c.req.formData();
-  const encoded = form.get("oauth_request");
-  const consentToken = form.get("consent_token");
-
-  if (typeof encoded !== "string" || typeof consentToken !== "string") {
-    return c.text("Invalid authorization form", 400);
-  }
-
-  if (!isSameOriginConsentPost(c.req.raw)) {
-    return c.text("CSRF validation failed", 400);
-  }
-
-  const storedConsent = await c.env.OAUTH_KV.get(`mcp:consent:${consentToken}`);
-  if (!storedConsent) {
-    return c.text("Authorization request expired. Please restart the connection.", 400);
-  }
-  let oauthReqInfo: AuthRequest;
-  try {
-    const submitted = JSON.parse(atob(encoded)) as AuthRequest;
-    const stored = JSON.parse(storedConsent) as AuthRequest;
-
-    // The hidden form value is treated as untrusted. It must match the
-    // server-side one-time authorization request stored in KV.
-    if (JSON.stringify(submitted) !== JSON.stringify(stored)) {
-      return c.text("Authorization request mismatch", 400);
-    }
-    oauthReqInfo = stored;
-  } catch {
-    return c.text("Invalid OAuth request state", 400);
-  }
-
-  if (!oauthReqInfo.clientId || !(await c.env.OAUTH_PROVIDER.lookupClient(oauthReqInfo.clientId))) {
-    return c.text("Unknown OAuth client", 400);
-  }
-
-  const state = crypto.randomUUID();
-  await c.env.OAUTH_KV.put(
-    `mcp:oauth:state:${state}`,
-    JSON.stringify({ oauthReqInfo, consentToken }),
-    { expirationTtl: 600 }
-  );
-
-  const callback = new URL("/callback", c.req.url).href;
-  const github = new URL("https://github.com/login/oauth/authorize");
-  github.searchParams.set("client_id", c.env.GH_OAUTH_CLIENT_ID);
-  github.searchParams.set("redirect_uri", callback);
-  github.searchParams.set("scope", "read:user user:email");
-  github.searchParams.set("state", state);
-
-  return new Response(null, {
-    status: 302,
-    headers: { Location: github.href }
   });
 });
 
@@ -178,20 +106,17 @@ app.get("/callback", async (c) => {
   if (!stored) return c.text("OAuth state expired", 400);
 
   let oauthReqInfo: AuthRequest;
-  let consentToken: string;
   try {
-    const parsed = JSON.parse(stored) as {
-      oauthReqInfo: AuthRequest;
-      consentToken: string;
-    };
+    const parsed = JSON.parse(stored) as { oauthReqInfo: AuthRequest };
     oauthReqInfo = parsed.oauthReqInfo;
-    consentToken = parsed.consentToken;
+    if (!oauthReqInfo?.clientId) {
+      return c.text("Invalid stored OAuth state", 500);
+    }
   } catch {
     return c.text("Invalid stored OAuth state", 500);
   }
 
   await c.env.OAUTH_KV.delete(`mcp:oauth:state:${state}`);
-  await c.env.OAUTH_KV.delete(`mcp:consent:${consentToken}`);
 
   const callback = new URL("/callback", c.req.url).href;
   const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
