@@ -103,7 +103,7 @@ h1{font-size:24px;margin-top:0}.muted{color:#666}.scope{padding:12px;background:
   return new Response(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self' https://github.com; frame-ancestors 'none'",
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff"
     }
@@ -127,8 +127,6 @@ app.post("/authorize", async (c) => {
   if (!storedConsent) {
     return c.text("Authorization request expired. Please restart the connection.", 400);
   }
-  await c.env.OAUTH_KV.delete(`mcp:consent:${consentToken}`);
-
   let oauthReqInfo: AuthRequest;
   try {
     const submitted = JSON.parse(atob(encoded)) as AuthRequest;
@@ -149,9 +147,11 @@ app.post("/authorize", async (c) => {
   }
 
   const state = crypto.randomUUID();
-  await c.env.OAUTH_KV.put(`mcp:oauth:state:${state}`, JSON.stringify(oauthReqInfo), {
-    expirationTtl: 600
-  });
+  await c.env.OAUTH_KV.put(
+    `mcp:oauth:state:${state}`,
+    JSON.stringify({ oauthReqInfo, consentToken }),
+    { expirationTtl: 600 }
+  );
 
   const callback = new URL("/callback", c.req.url).href;
   const github = new URL("https://github.com/login/oauth/authorize");
@@ -176,14 +176,22 @@ app.get("/callback", async (c) => {
 
   const stored = await c.env.OAUTH_KV.get(`mcp:oauth:state:${state}`);
   if (!stored) return c.text("OAuth state expired", 400);
-  await c.env.OAUTH_KV.delete(`mcp:oauth:state:${state}`);
 
   let oauthReqInfo: AuthRequest;
+  let consentToken: string;
   try {
-    oauthReqInfo = JSON.parse(stored) as AuthRequest;
+    const parsed = JSON.parse(stored) as {
+      oauthReqInfo: AuthRequest;
+      consentToken: string;
+    };
+    oauthReqInfo = parsed.oauthReqInfo;
+    consentToken = parsed.consentToken;
   } catch {
     return c.text("Invalid stored OAuth state", 500);
   }
+
+  await c.env.OAUTH_KV.delete(`mcp:oauth:state:${state}`);
+  await c.env.OAUTH_KV.delete(`mcp:consent:${consentToken}`);
 
   const callback = new URL("/callback", c.req.url).href;
   const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
