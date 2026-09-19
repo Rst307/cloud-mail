@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { AuthHandler } from "./auth-handler";
 
@@ -99,10 +99,12 @@ function createServer() {
     },
     async (_args, context) => {
       requireAnyScope(context, ["mail.read", "mail.send"]);
-      const auth = getMcpAuthContext();
       const profile = await callMail("/profile");
+      const props = context?.http?.authInfo?.extra?.props as
+        | Record<string, unknown>
+        | undefined;
       return result({
-        oauthUser: auth?.props?.login,
+        oauthUser: props?.login,
         cloudMail: profile
       });
     }
@@ -274,7 +276,36 @@ function createServer() {
   return server;
 }
 
-const apiHandler = createMcpHandler(createServer);
+const mcpHandler = createMcpHandler(createServer);
+
+const apiHandler = {
+  fetch(request: Request, _bindings: unknown, ctx: ExecutionContext) {
+    const props = (ctx.props || {}) as Record<string, unknown>;
+    const authorization = request.headers.get("Authorization") || "";
+    const match = /^Bearer\\s+(.+)$/i.exec(authorization);
+    const token = match?.[1];
+    const clientId =
+      typeof props.mcpClientId === "string" ? props.mcpClientId : undefined;
+    const scopes = Array.isArray(props.mcpScopes)
+      ? props.mcpScopes.filter((scope): scope is string => typeof scope === "string")
+      : [];
+
+    if (!token || !clientId) {
+      return new Response("Authenticated MCP context is incomplete", {
+        status: 500
+      });
+    }
+
+    return mcpHandler.fetch(request, {
+      authInfo: {
+        token,
+        clientId,
+        scopes,
+        extra: { props }
+      }
+    });
+  }
+};
 
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
